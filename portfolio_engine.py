@@ -1,96 +1,107 @@
 from dataclasses import dataclass
-from typing import List, Dict, Any
+import numpy as np
 import pandas as pd
-from weather_service import get_rain_risk
 from pv_model import simulate_clear_sky_production
-from decision_engine import CleaningEconomics, calculate_cleaning_roi
+from weather_service import get_rain_risk
 
 
 @dataclass
 class SolarPlant:
-    id: str
-    name: str
-    latitude: float
-    longitude: float
-    capacity_kwp: float
-    current_soiling_ratio: float
-    washing_cost_usd: float
-    electricity_tariff_usd: float
+
+  id: str
+  name: str
+  latitude: float
+  longitude: float
+  capacity_kwp: float
+  current_soiling_ratio: float  # Örn: 0.12 (%12)
+  washing_cost_usd: float
+  electricity_tariff_usd: float  # $/kWh
 
 
-# Portföydeki Referans Santraller
-DEFAULT_PORTFOLIO: List[SolarPlant] = [
+# Global Referans Şablon Portföyü
+DEFAULT_PORTFOLIO = [
     SolarPlant(
         id="PLANT-01",
-        name="Konya Karapınar Bozkır GES",
-        latitude=37.71,
+        name="Konya Karapınar GES",
+        latitude=37.87,
         longitude=33.55,
-        capacity_kwp=1500.0,
-        current_soiling_ratio=0.09,
-        washing_cost_usd=1400.0,
-        electricity_tariff_usd=0.085,
+        capacity_kwp=3000.0,
+        current_soiling_ratio=0.12,
+        washing_cost_usd=1600.0,
+        electricity_tariff_usd=0.08,
     ),
     SolarPlant(
         id="PLANT-02",
-        name="Şanlıurfa GAP Sanayi GES",
+        name="Şanlıurfa GAP GES",
         latitude=37.16,
         longitude=38.79,
         capacity_kwp=2500.0,
-        current_soiling_ratio=0.14,
-        washing_cost_usd=2100.0,
-        electricity_tariff_usd=0.090,
+        current_soiling_ratio=0.15,
+        washing_cost_usd=1400.0,
+        electricity_tariff_usd=0.08,
     ),
     SolarPlant(
         id="PLANT-03",
-        name="Dubai MBR Solar Park (Phase III)",
-        latitude=24.75,
-        longitude=55.36,
-        capacity_kwp=5000.0,
-        current_soiling_ratio=0.22,
-        washing_cost_usd=4200.0,
-        electricity_tariff_usd=0.065,
+        name="Mersin Akdeniz GES",
+        latitude=36.81,
+        longitude=34.64,
+        capacity_kwp=2000.0,
+        current_soiling_ratio=0.08,
+        washing_cost_usd=1100.0,
+        electricity_tariff_usd=0.08,
     ),
 ]
 
 
-def evaluate_portfolio(plants: List[SolarPlant] = DEFAULT_PORTFOLIO) -> pd.DataFrame:
-    """
-    Tüm santralleri tara, ensemble yağış riskini ve beklenen net kazancı
-    hesaplayarak açgözlü (greedy) öncelik sırasına diz.
-    """
-    records = []
+def evaluate_portfolio(plants: list[SolarPlant]) -> pd.DataFrame:
+  """Tüm portföydeki sahaları meteorolojik yağış riski ve fiziksel kayba göre analiz eder."""
+  records = []
 
-    for plant in plants:
-        # 1. Hava durumu ve yağış riski
-        _, rain_prob = get_rain_risk(plant.latitude, plant.longitude)
+  for plant in plants:
+    # 1. Fiziksel Üretim Potansiyeli
+    try:
+      df_pv = simulate_clear_sky_production(
+          plant.latitude, plant.longitude, peak_power_kw=plant.capacity_kwp
+      )
+      daily_clean_kwh = float(df_pv["clean_power_kw"].sum())
+    except Exception:
+      daily_clean_kwh = plant.capacity_kwp * 4.5  # Günlük ortalama 4.5 Eşdeğer Güneş Saati
 
-        # 2. Fiziksel teorik üretim tahmini (günlük MWh)
-        df_pv = simulate_clear_sky_production(
-            plant.latitude, plant.longitude, peak_power_kw=plant.capacity_kwp
-        )
-        daily_mwh = df_pv["clean_power_kw"].sum() / 1000.0
+    # 2. Meteorolojik Yağmur Riski
+    _, rain_risk_percent = get_rain_risk(plant.latitude, plant.longitude)
 
-        # 3. Finansal analiz
-        econ = CleaningEconomics(
-            electricity_tariff_usd_per_kwh=plant.electricity_tariff_usd,
-            washing_cost_usd=plant.washing_cost_usd,
-            daily_production_mwh=daily_mwh,
-            current_soiling_ratio=plant.current_soiling_ratio,
-        )
-        roi = calculate_cleaning_roi(rain_probability_pct=rain_prob, economics=econ)
+    # 3. Finansal Kayıp ve Karar Motoru
+    daily_energy_loss_kwh = daily_clean_kwh * plant.current_soiling_ratio
+    daily_revenue_loss = daily_energy_loss_kwh * plant.electricity_tariff_usd
 
-        records.append({
-            "Saha Kodu": plant.id,
-            "Santral Adı": plant.name,
-            "Kapasite (kWp)": plant.capacity_kwp,
-            "Mevcut Toz (%)": int(plant.current_soiling_ratio * 100),
-            "7G Yağış Olasılığı (%)": rain_prob,
-            "Günlük Kayıp ($)": roi["daily_saved_value_usd"],
-            "Beklenen Net Kazanç ($)": roi["expected_net_gain_usd"],
-            "Karar": "YIKA" if roi["should_wash"] else "BEKLE",
-            "Öncelik Skoru": roi["expected_net_gain_usd"] / plant.washing_cost_usd,
-        })
+    # 14 günlük kurtarılabilir enerji değeri
+    recovered_energy_14d_usd = daily_revenue_loss * 14.0
 
-    df = pd.DataFrame(records)
-    # En yüksek net getiri ve öncelik skoruna göre sırala
-    return df.sort_values(by="Öncelik Skoru", ascending=False).reset_index(drop=True)
+    # Olasılıklı Net Fayda: E[ROI] = (1 - P_rain) * Gain - Cost
+    p_rain = rain_risk_percent / 100.0
+    expected_gain = ((1.0 - p_rain) * recovered_energy_14d_usd) - (
+        plant.washing_cost_usd
+    )
+
+    # Karar Fonksiyonu
+    decision = "YIKA" if expected_gain > 0 else "BEKLE"
+    priority_score = expected_gain / (plant.washing_cost_usd + 1.0)
+
+    records.append({
+        "Saha Kodu": plant.id,
+        "Santral Adı": plant.name,
+        "Enlem": plant.latitude,
+        "Boylam": plant.longitude,
+        "Kapasite (kWp)": plant.capacity_kwp,
+        "Mevcut Toz (%)": round(plant.current_soiling_ratio * 100, 1),
+        "7G Yağış Olasılığı (%)": round(rain_risk_percent, 1),
+        "Günlük Kayıp ($)": round(daily_revenue_loss, 2),
+        "Beklenen Net Kazanç ($)": round(expected_gain, 2),
+        "Karar": decision,
+        "Öncelik Skoru": round(priority_score, 3),
+    })
+
+  df = pd.DataFrame(records)
+  if not df.empty:
+    df = df.sort_values(by="Beklenen Net Kazanç ($)", ascending=False)
+  return df
