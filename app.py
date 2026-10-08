@@ -6,22 +6,24 @@ from pv_model import simulate_clear_sky_production
 from weather_service import get_rain_risk
 from benchmark_engine import generate_benchmark_dataset, calculate_validation_metrics
 
-# Sayfa Yapılandırması
 st.set_page_config(
     page_title="SolarClever Core | Enterprise Soiling Optimization",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-# Portföy Oturumu (Session State)
+# Portföy oturumu kontrolü
 if "portfolio" not in st.session_state:
-    st.session_state.portfolio = list(DEFAULT_PORTFOLIO)
+    st.session_state.portfolio = [
+        SolarPlant(id=p.id, name=p.name, latitude=p.latitude, longitude=p.longitude,
+                   capacity_kwp=p.capacity_kwp, current_soiling_ratio=p.current_soiling_ratio,
+                   washing_cost_usd=p.washing_cost_usd, electricity_tariff_usd=p.electricity_tariff_usd)
+        for p in DEFAULT_PORTFOLIO
+    ]
 
-# Ana Başlık
 st.title("⚡ SolarClever: Portföy Düzeyi GES Tozlanma & Karar Destek Sistemi")
-st.caption("Açık meteoroloji (Open-Meteo GFS), aerosol (PM10) uydu verileri ve NREL RdTools uyumlu fiziksel optimizasyon motoru")
+st.caption("Açık meteoroloji (Open-Meteo GFS), aerosol (PM10) uydu verileri ve NREL RdTools uyumlu fiziksel performans motoru")
 
-# Sekmeler
 tab1, tab2, tab3, tab4 = st.tabs([
     "📊 Portföy & Coğrafi İzleme",
     "🔬 Tek Saha Fiziksel Analiz",
@@ -29,14 +31,44 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "🎯 What-If Finansal Simülatör",
 ])
 
-# ==============================================================================
-# SEKME 1: ÇOK SAHALI PORTFÖY & COĞRAFİ HARİTA
-# ==============================================================================
+# ----------------- SEKME 1: PORTFÖY & HARİTA -----------------
 with tab1:
+    # 1. Yeni Saha Ekleme Formu (Form yapısı ile garanti ekleme)
+    with st.expander("➕ Sisteme Yeni GES Ekle", expanded=False):
+        with st.form("add_plant_form"):
+            c1, c2, c3 = st.columns(3)
+            new_name = c1.text_input("Santral Adı", value="Kıvanç 2 GES")
+            new_id = c2.text_input("Saha Kodu", value=f"PLANT-{len(st.session_state.portfolio)+1:02d}")
+            new_cap = c3.number_input("Kurulu Güç (kWp)", value=2000.0, step=250.0)
+
+            c4, c5, c6, c7, c8 = st.columns(5)
+            new_lat = c4.number_input("Enlem (Lat)", value=36.80, format="%.2f")
+            new_lon = c5.number_input("Boylam (Lon)", value=34.63, format="%.2f")
+            new_soiling = c6.slider("Mevcut Toz (%)", 1, 35, 12) / 100.0
+            new_wash_cost = c7.number_input("Yıkama Maliyeti ($)", value=1800.0, step=100.0)
+            new_tariff = c8.number_input("Tarife ($/kWh)", value=0.08, format="%.2f")
+
+            submit_btn = st.form_submit_button("🚀 Sahayı Portföye Kaydet")
+            if submit_btn:
+                new_plant = SolarPlant(
+                    id=new_id,
+                    name=new_name,
+                    latitude=new_lat,
+                    longitude=new_lon,
+                    capacity_kwp=new_cap,
+                    current_soiling_ratio=new_soiling,
+                    washing_cost_usd=new_wash_cost,
+                    electricity_tariff_usd=new_tariff,
+                )
+                st.session_state.portfolio.append(new_plant)
+                st.success(f"{new_name} portföye başarıyla eklendi!")
+                st.rerun()
+
+    # Portföy değerlendirmesi
     with st.spinner("Tüm sahalar için anlık meteoroloji ve fiziksel modeller taranıyor..."):
         df_raw = evaluate_portfolio(st.session_state.portfolio)
 
-    # 1. Üst KPI Özet Kartları
+    # KPI Kartları
     total_capacity_mw = sum(p.capacity_kwp for p in st.session_state.portfolio) / 1000.0
     total_daily_loss = df_raw["Günlük Kayıp ($)"].sum()
     wash_needed_count = len(df_raw[df_raw["Karar"] == "YIKA"])
@@ -49,17 +81,15 @@ with tab1:
 
     st.divider()
 
-    # 2. Coğrafi GIS Haritası ve Karşılaştırma Grafiği
+    # Coğrafi Harita ve Grafik
     map_col, graph_col = st.columns([1, 1])
 
     with map_col:
         st.subheader("🗺️ Coğrafi Saha Dağılımı")
-        plant_coords = {p.id: (p.latitude, p.longitude) for p in st.session_state.portfolio}
         df_map = pd.DataFrame([
             {"latitude": p.latitude, "longitude": p.longitude}
             for p in st.session_state.portfolio
         ])
-        # Hata vermeyen Streamlit yerleşik haritası
         st.map(df_map, latitude="latitude", longitude="longitude", size=25, color="#F59E0B")
 
     with graph_col:
@@ -77,30 +107,6 @@ with tab1:
         st.plotly_chart(fig_bar, use_container_width=True)
 
     st.subheader("📋 Detaylı Portföy Tablosu")
-    
-    # Yeni Saha Ekleme Formu
-    with st.expander("➕ Sisteme Yeni GES Ekle"):
-        c1, c2, c3 = st.columns(3)
-        new_name = c1.text_input("Santral Adı", value="Gaziantep Şahinbey GES")
-        new_id = c2.text_input("Saha Kodu", value=f"PLANT-{len(st.session_state.portfolio)+1:02d}")
-        new_cap = c3.number_input("Kurulu Güç (kWp)", value=2000.0, step=250.0)
-
-        c4, c5, c6, c7, c8 = st.columns(5)
-        new_lat = c4.number_input("Enlem (Lat)", value=37.06, format="%.2f")
-        new_lon = c5.number_input("Boylam (Lon)", value=37.38, format="%.2f")
-        new_soiling = c6.slider("Mevcut Toz (%)", 1, 35, 12) / 100.0
-        new_wash_cost = c7.number_input("Yıkama Maliyeti ($)", value=1800.0, step=100.0)
-        new_tariff = c8.number_input("Tarife ($/kWh)", value=0.08, format="%.2f")
-
-        if st.button("🚀 Sahayı Portföye Ekle"):
-            added = SolarPlant(
-                id=new_id, name=new_name, latitude=new_lat, longitude=new_lon,
-                capacity_kwp=new_cap, current_soiling_ratio=new_soiling,
-                washing_cost_usd=new_wash_cost, electricity_tariff_usd=new_tariff
-            )
-            st.session_state.portfolio.append(added)
-            st.rerun()
-
     df_display = df_raw.copy()
     df_display["Kapasite (kWp)"] = df_display["Kapasite (kWp)"].apply(lambda x: f"{x:,.0f} kWp")
     df_display["Mevcut Toz (%)"] = df_display["Mevcut Toz (%)"].apply(lambda x: f"%{x}")
@@ -111,9 +117,7 @@ with tab1:
 
     st.dataframe(df_display, use_container_width=True)
 
-# ==============================================================================
-# SEKME 2: TEK SAHA FİZİKSEL ANALİZ
-# ==============================================================================
+# ----------------- SEKME 2: TEK SAHA FİZİKSEL ANALİZ -----------------
 with tab2:
     selected_plant = st.selectbox(
         "Detaylı Simülasyonu İncelenecek Santral:",
@@ -136,9 +140,7 @@ with tab2:
         fig_scenarios = px.line(df_rain, x="timestamp", y=member_cols, title="Ensemble Yağış Senaryoları (mm)")
         st.plotly_chart(fig_scenarios, use_container_width=True)
 
-# ==============================================================================
-# SEKME 3: BENCHMARK & DOĞRULAMA (NREL RDTOOLS)
-# ==============================================================================
+# ----------------- SEKME 3: BENCHMARK & DOĞRULAMA (NREL) -----------------
 with tab3:
     st.subheader("NREL RdTools Standardı ile Model Doğrulaması")
     st.caption("90 Günlük referans çöl sahası SCADA verisi üzerinde Kimber modelinin doğrulama metrikleri.")
@@ -160,9 +162,7 @@ with tab3:
     )
     st.plotly_chart(fig_bench, use_container_width=True)
 
-# ==============================================================================
-# SEKME 4: WHAT-IF DUYARLILIK SİMÜLATÖRÜ
-# ==============================================================================
+# ----------------- SEKME 4: WHAT-IF SİMÜLATÖRÜ -----------------
 with tab4:
     st.subheader("Finansal Duyarlılık ve Parametre Simülatörü")
     st.caption("Yıkama maliyeti ve elektrik tarifesi dalgalanmalarının yıkama kararına etkisi.")
@@ -184,5 +184,4 @@ with tab4:
         columns=[f"${t}/kWh" for t in sim_tariffs]
     )
     st.write("**Net Kazanç Matrisi ($):**")
-    # matplotlib bağımlılığı olmadan temiz tablo gösterimi
     st.dataframe(df_matrix, use_container_width=True)
